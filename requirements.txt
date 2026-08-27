@@ -1,0 +1,8 @@
+aiogram>=3.30.0
+telethon>=1.36.0
+pyrogram>=2.0.106
+tgcrypto>=1.2.5
+motor>=3.7.0
+dnspython>=2.8.0
+cython>=3.0.0
+setuptools>=68.0.0
