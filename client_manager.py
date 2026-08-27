@@ -52,7 +52,7 @@ def get_clean_channel_ids(peer) -> tuple[str, str]:
     return database.normalize_channel_id(str(peer))
 
 async def dispatch_single_dm_item(client: TelegramClient, recipient_id: int, req_name: str, chat_title: str, req_user, msg_type: str, template: str | None, media_path: str | None, owner_id: int, slot_num: int = 1):
-    """Format and send one individual DM item (Text, Sticker, Voice Note, Video Note, Photo, Video, Audio, Document)."""
+    """Format and send one individual DM item with auto-retry and FloodWait protection."""
     # 1. Format text if template exists
     if template:
         try:
@@ -65,40 +65,52 @@ async def dispatch_single_dm_item(client: TelegramClient, recipient_id: int, req
     else:
         formatted_text = f"Hey {req_name}! Welcome to {chat_title}." if msg_type not in ("sticker", "voice", "video_note") else None
 
-    # 2. Dispatch with robust format handling
-    try:
-        if msg_type == "sticker" and media_path and os.path.exists(media_path):
-            await client.send_file(recipient_id, media_path)
-            logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Sticker DM sent to {req_name} ({recipient_id})")
+    # 2. Dispatch with auto-retry on FloodWait / Rate limits
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if msg_type == "sticker" and media_path and os.path.exists(media_path):
+                await client.send_file(recipient_id, media_path)
+                logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Sticker DM sent to {req_name} ({recipient_id})")
 
-        elif msg_type == "voice" and media_path and os.path.exists(media_path):
-            caption_text = formatted_text if formatted_text and not formatted_text.startswith("🎤") else None
-            try:
-                # Try sending voice note with caption
-                await client.send_file(recipient_id, media_path, voice_note=True, caption=caption_text, parse_mode="html")
-                logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Voice Note DM sent to {req_name} ({recipient_id})")
-            except Exception as ve:
-                logger.warning(f"Voice note with caption note: {ve}. Sending voice note and text separately...")
-                await client.send_file(recipient_id, media_path, voice_note=True)
-                if caption_text:
-                    await client.send_message(recipient_id, caption_text, parse_mode="html")
-                logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Voice Note + Text DM sent to {req_name} ({recipient_id})")
+            elif msg_type == "voice" and media_path and os.path.exists(media_path):
+                caption_text = formatted_text if formatted_text and not formatted_text.startswith("🎤") else None
+                try:
+                    await client.send_file(recipient_id, media_path, voice_note=True, caption=caption_text, parse_mode="html")
+                    logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Voice Note DM sent to {req_name} ({recipient_id})")
+                except Exception as ve:
+                    logger.warning(f"Voice note with caption note: {ve}. Sending voice note and text separately...")
+                    await client.send_file(recipient_id, media_path, voice_note=True)
+                    if caption_text:
+                        await client.send_message(recipient_id, caption_text, parse_mode="html")
+                    logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Voice Note + Text DM sent to {req_name} ({recipient_id})")
 
-        elif msg_type == "video_note" and media_path and os.path.exists(media_path):
-            await client.send_file(recipient_id, media_path, video_note=True)
-            logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Round Video Note DM sent to {req_name} ({recipient_id})")
+            elif msg_type == "video_note" and media_path and os.path.exists(media_path):
+                await client.send_file(recipient_id, media_path, video_note=True)
+                logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Round Video Note DM sent to {req_name} ({recipient_id})")
 
-        elif media_path and os.path.exists(media_path):
-            await client.send_file(recipient_id, media_path, caption=formatted_text, parse_mode="html")
-            logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Media ({msg_type}) DM sent to {req_name} ({recipient_id})")
+            elif media_path and os.path.exists(media_path):
+                await client.send_file(recipient_id, media_path, caption=formatted_text, parse_mode="html")
+                logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Media ({msg_type}) DM sent to {req_name} ({recipient_id})")
 
-        elif formatted_text:
-            await client.send_message(recipient_id, formatted_text, parse_mode="html")
-            logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Text/Emoji DM sent to {req_name} ({recipient_id})")
+            elif formatted_text:
+                await client.send_message(recipient_id, formatted_text, parse_mode="html")
+                logger.info(f"✅ [Account {owner_id}] [Msg {slot_num}] Text/Emoji DM sent to {req_name} ({recipient_id})")
 
-    except Exception as e:
-        logger.error(f"❌ [Account {owner_id}] Error dispatching [Msg {slot_num}] ({msg_type}) to {req_name} ({recipient_id}): {e}")
-        raise
+            return # Success!
+        except FloodWaitError as fe:
+            wait_time = fe.seconds + 1
+            logger.warning(f"⏳ [Account {owner_id}] Rate-limited (FloodWait). Waiting {wait_time}s before retrying for {req_name}...")
+            await asyncio.sleep(wait_time)
+        except Exception as e:
+            err_str = str(e)
+            if "Too many requests" in err_str or "flood" in err_str.lower():
+                wait_sec = 2.0 * (attempt + 1)
+                logger.warning(f"⏳ [Account {owner_id}] Concurrent spike for {req_name}. Retrying in {wait_sec}s...")
+                await asyncio.sleep(wait_sec)
+            else:
+                logger.error(f"❌ [Account {owner_id}] Error dispatching [Msg {slot_num}] ({msg_type}) to {req_name} ({recipient_id}): {e}")
+                raise e
 
 async def process_single_join_request(client: TelegramClient, owner_id: int, peer, req_user_id: int, chat_title: str | None = None):
     """Core logic to send DM and auto-approve a single join requester INSTANTLY with strict 1-time DM protection."""
@@ -338,6 +350,7 @@ async def pending_requests_scanner_loop(client: TelegramClient, owner_id: int):
                                     req_user_id=req_uid,
                                     chat_title=chat_name
                                 ))
+                                await asyncio.sleep(0.4) # Natural anti-flood stagger prevents SendMessageRequest rate-limit
                     except (ChatAdminRequiredError, FloodWaitError):
                         pass
                     except Exception:
