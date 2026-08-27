@@ -288,8 +288,59 @@ def extract_join_updates(event) -> list:
         results.extend(extract_join_updates(event.update))
     return results
 
+async def scan_and_drain_all_channel_importers(client: TelegramClient, owner_id: int, peer, chat_name: str):
+    """Fetch and process ALL pages of pending join requests (up to 500) using MTProto pagination so zero users are skipped."""
+    offset_date = None
+    offset_user = types.InputUserEmpty()
+    total_processed = 0
+    max_to_drain = 500
+
+    while user_id_is_active(owner_id) and total_processed < max_to_drain:
+        try:
+            res = await client(functions.messages.GetChatInviteImportersRequest(
+                peer=peer,
+                requested=True,
+                limit=100,
+                offset_date=offset_date,
+                offset_user=offset_user
+            ))
+            if not res or not res.importers:
+                break
+
+            for importer in res.importers:
+                if not user_id_is_active(owner_id):
+                    break
+                req_uid = importer.user_id
+                asyncio.create_task(process_single_join_request(
+                    client=client,
+                    owner_id=owner_id,
+                    peer=peer,
+                    req_user_id=req_uid,
+                    chat_title=chat_name
+                ))
+                total_processed += 1
+                await asyncio.sleep(0.3)
+
+            # If less than 100 returned, we reached the end of all pending requests
+            if len(res.importers) < 100:
+                break
+
+            # Paginate to next batch using last importer's date & entity
+            last_importer = res.importers[-1]
+            offset_date = last_importer.date
+            try:
+                offset_user = await client.get_input_entity(last_importer.user_id)
+            except Exception:
+                offset_user = types.InputUser(last_importer.user_id, 0)
+
+        except (ChatAdminRequiredError, FloodWaitError):
+            break
+        except Exception as e:
+            logger.debug(f"Drain error on channel {chat_name}: {e}")
+            break
+
 async def pending_requests_scanner_loop(client: TelegramClient, owner_id: int):
-    """Zero-flood background scanner with cached admin channels."""
+    """Zero-flood background scanner with cached admin channels and complete backlog pagination."""
     logger.info(f"⚡ Zero-flood scanner active for account {owner_id}")
     
     cached_channels = []
@@ -332,33 +383,11 @@ async def pending_requests_scanner_loop(client: TelegramClient, owner_id: int):
                     if (peer_raw in disabled_channels) or (peer_full in disabled_channels):
                         continue
 
-                    try:
-                        res = await client(functions.messages.GetChatInviteImportersRequest(
-                            peer=peer,
-                            requested=True,
-                            limit=20,
-                            offset_date=None,
-                            offset_user=types.InputUserEmpty()
-                        ))
-                        if res and res.importers:
-                            for importer in res.importers:
-                                req_uid = importer.user_id
-                                asyncio.create_task(process_single_join_request(
-                                    client=client,
-                                    owner_id=owner_id,
-                                    peer=peer,
-                                    req_user_id=req_uid,
-                                    chat_title=chat_name
-                                ))
-                                await asyncio.sleep(0.4) # Natural anti-flood stagger prevents SendMessageRequest rate-limit
-                    except (ChatAdminRequiredError, FloodWaitError):
-                        pass
-                    except Exception:
-                        pass
+                    await scan_and_drain_all_channel_importers(client, owner_id, peer, chat_name)
         except Exception as e:
             logger.debug(f"Scanner error on {owner_id}: {e}")
 
-        # High speed check interval: 1.5 seconds (zero flood wait)
+        # Check interval: 1.5 seconds (zero flood wait)
         await asyncio.sleep(1.5)
 
 def user_id_is_active(user_id: int) -> bool:
@@ -390,13 +419,7 @@ async def start_client(user_id: int, session_string: str) -> bool:
                 if isinstance(event, types.UpdatePendingJoinRequests):
                     peer = getattr(event, "peer", None) or getattr(event, "channel_id", None)
                     if peer:
-                        asyncio.create_task(client(functions.messages.GetChatInviteImportersRequest(
-                            peer=peer,
-                            requested=True,
-                            limit=20,
-                            offset_date=None,
-                            offset_user=types.InputUserEmpty()
-                        )))
+                        asyncio.create_task(scan_and_drain_all_channel_importers(client, user_id, peer, "Channel"))
                     return
 
                 # Check all requester updates
