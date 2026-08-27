@@ -5,7 +5,7 @@ API_ID = int(os.getenv("API_ID", "30929822"))
 API_HASH = os.getenv("API_HASH", "8586e9580c6480b65d23150cec959506")
 
 # Master Bot Token from @BotFather on Telegram
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8696953804:AAF4M-vJww5z047AN5mDvWJ_Hreet6NlyzA")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8696953804:AAHjufDAPI9QqeI6eMdZO4DEgadb1iE8FoI")
 
 # MongoDB Cloud Database Configuration
 MONGO_URI = os.getenv(
